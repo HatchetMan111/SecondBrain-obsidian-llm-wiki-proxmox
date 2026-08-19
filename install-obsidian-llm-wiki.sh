@@ -1,0 +1,565 @@
+#!/usr/bin/env bash
+# =====================================================================
+#  SecondBrain Installer fuer Proxmox VE
+#  Obsidian Vaults + Syncthing nach dem LLM-Wiki-Pattern (Karpathy)
+#  Work und Private werden als zwei getrennte Vaults gefuehrt.
+#
+#  Repo: https://github.com/HatchetMan111/SecondBrain-obsidian-llm-wiki-proxmox
+#
+#  Ausfuehren (auf dem Proxmox-Host, als root):
+#    bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/SecondBrain-obsidian-llm-wiki-proxmox/main/install-obsidian-llm-wiki.sh)"
+# =====================================================================
+# shellcheck disable=SC2154,SC1090,SC2016,SC2317
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------
+# Farben / Ausgaben
+# ---------------------------------------------------------------------
+GREEN="\e[32m"
+RED="\e[31m"
+YELLOW="\e[33m"
+BLUE="\e[36m"
+RESET="\e[0m"
+
+msg_info()  { echo -e "${BLUE}[INFO]${RESET} $*"; }
+msg_ok()    { echo -e "${GREEN}[ OK ]${RESET} $*"; }
+msg_warn()  { echo -e "${YELLOW}[WARN]${RESET} $*"; }
+msg_error() { echo -e "${RED}[FEHLER]${RESET} $*"; }
+
+header() {
+  clear
+  cat <<"EOF"
+==========================================================
+  SecondBrain Installer (LLM-Wiki-Pattern nach Karpathy)
+  Obsidian-Vaults + Syncthing auf Proxmox VE (LXC)
+  Work & Private - getrennte Vaults
+==========================================================
+EOF
+}
+
+# ---------------------------------------------------------------------
+# Pruefungen
+# ---------------------------------------------------------------------
+root_check() {
+  if [ "$(id -u)" -ne 0 ]; then
+    msg_error "Bitte als root ausfuehren (z.B. sudo -i)."
+    exit 1
+  fi
+}
+
+pve_check() {
+  if [ ! -x /usr/bin/pveversion ]; then
+    msg_error "Dieses Script muss direkt auf dem Proxmox-Host ausgefuehrt werden."
+    exit 1
+  fi
+  msg_ok "Proxmox VE erkannt: $(pveversion | awk '{print $2}')"
+}
+
+# ---------------------------------------------------------------------
+# Parameterabfragen (whiptail)
+# ---------------------------------------------------------------------
+default_vmid() {
+  pvesh get /cluster/nextid 2>/dev/null | tr -d '\n'
+}
+
+detect_storage() {
+  local st
+  st=$(pvesm status -content rootdir 2>/dev/null | awk '$2=="zfspool" && $3=="active" {print $1; exit}')
+  if [ -z "$st" ]; then
+    st=$(pvesm status -content rootdir 2>/dev/null | awk '$3=="active" {print $1; exit}')
+  fi
+  [ -n "$st" ] || st="local"
+  echo "$st"
+}
+
+detect_bridge() {
+  local b=""
+  for c in /sys/class/net/vmbr*; do
+    if [ -e "$c" ]; then
+      b=$(basename "$c")
+      break
+    fi
+  done
+  [ -n "$b" ] || b="vmbr0"
+  echo "$b"
+}
+
+prompt_whiptail() {
+  local title="$1" text="$2" default="$3" result
+  if result=$(whiptail --title "$title" --inputbox "$text" 12 70 "$default" 3>&1 1>&2 2>&3); then
+    echo "$result"
+  else
+    msg_error "Abbruch durch Benutzer."
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------
+# Hauptprogramm
+# ---------------------------------------------------------------------
+main() {
+  header
+  root_check
+  pve_check
+
+  local vm_id hostname ct_ip net_conf gw ns bridge storage disk_size ram cores sshkey sync_user sync_pass
+
+  vm_id=$(prompt_whiptail "Container-ID" "Container-ID (VMID):" "$(default_vmid)")
+  hostname=$(prompt_whiptail "Hostname" "Hostname des Containers:" "obsidian")
+  hostname=$(echo "$hostname" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+
+  bridge=$(detect_bridge)
+  bridge=$(prompt_whiptail "Netzwerk-Bridge" "Netzwerk-Bridge:" "$bridge")
+
+  ct_ip=$(prompt_whiptail "IP-Adresse" "IP-Adresse + CIDR des Containers (leer = DHCP):\nBeispiel: 192.168.1.100/24" "dhcp")
+  if [ "$ct_ip" = "dhcp" ] || [ -z "$ct_ip" ]; then
+    ct_ip="dhcp"
+    gw=""
+    ns=""
+  else
+    gw=$(prompt_whiptail "Gateway" "Gateway (z.B. 192.168.1.1):" "")
+    ns=$(prompt_whiptail "Nameserver" "Nameserver (z.B. 1.1.1.1):" "1.1.1.1")
+  fi
+
+  storage=$(detect_storage)
+  storage=$(prompt_whiptail "Storage" "Storage fuer Container-Disk (ZFS empfohlen):" "$storage")
+  disk_size=$(prompt_whiptail "Disk" "Disk-Groesse (z.B. 16G):" "16G")
+  ram=$(prompt_whiptail "RAM (MB)" "RAM in MB:" "2048")
+  cores=$(prompt_whiptail "CPU-Cores" "Anzahl CPU-Cores:" "2")
+
+  sshkey=$(prompt_whiptail "SSH-Key (optional)" "Pfad zum oeffentlichen SSH-Schluessel (leer = kein):" "")
+
+  sync_user=$(prompt_whiptail "Syncthing-Web-UI User" "Benutzername fuer das Syncthing-Web-UI:" "syncthing")
+
+  if sync_pass=$(whiptail --title "Syncthing-Web-UI Passwort" --passwordbox "Passwort fuer das Syncthing-Web-UI:" 10 60 "" 3>&1 1>&2 2>&3); then
+    :
+  else
+    msg_error "Abbruch durch Benutzer."
+    exit 1
+  fi
+  if [ -z "$sync_pass" ]; then
+    sync_pass=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 14 || true)
+    msg_warn "Kein Passwort eingegeben - zufaellig generiert: $sync_pass"
+  fi
+
+  # --- Container existiert bereits? ---
+  if pct status "$vm_id" >/dev/null 2>&1; then
+    msg_error "Container mit ID $vm_id existiert bereits."
+    exit 1
+  fi
+
+  # --- Template ermitteln / herunterladen ---
+  local template_store template_name
+  template_store=$(pvesm status -content vztmpl 2>/dev/null | awk '$3=="active" {print $1; exit}')
+  [ -n "$template_store" ] || template_store="local"
+
+  template_name=$(pveam available -section system 2>/dev/null | grep -oE 'debian-12-standard_[0-9.]+-[0-9]+_amd64\.tar\.(zst|xz)' | sort -u | tail -1)
+  if [ -z "$template_name" ]; then
+    msg_warn "Konnte Template-Liste nicht laden - versuche pveam update ..."
+    pveam update >/dev/null 2>&1 || true
+    template_name=$(pveam available -section system 2>/dev/null | grep -oE 'debian-12-standard_[0-9.]+-[0-9]+_amd64\.tar\.(zst|xz)' | sort -u | tail -1)
+  fi
+  if [ -z "$template_name" ]; then
+    msg_error "Debian-12-Template konnte nicht ermittelt werden. Kein Internetzugang?"
+    exit 1
+  fi
+
+  if ! pveam list "$template_store" 2>/dev/null | grep -q "$template_name"; then
+    msg_info "Lade Template $template_name herunter ..."
+    pveam download "$template_store" "$template_name" >/dev/null 2>&1 || {
+      msg_error "Template-Download fehlgeschlagen."
+      exit 1
+    }
+  fi
+  local template="${template_store}:vztmpl/${template_name}"
+
+  # --- Netzwerk-Konfig ---
+  local net_conf
+  if [ "$ct_ip" = "dhcp" ]; then
+    net_conf="name=eth0,bridge=${bridge},ip=dhcp"
+  else
+    net_conf="name=eth0,bridge=${bridge},ip=${ct_ip},gw=${gw}"
+  fi
+
+  # --- Container anlegen ---
+  msg_info "Lege Container $vm_id an (Hostname: $hostname) ..."
+  local ssh_args=()
+  if [ -n "$sshkey" ]; then
+    ssh_args=(--ssh-public-keys "$sshkey")
+  fi
+
+  pct create "$vm_id" "$template" \
+    --hostname "$hostname" \
+    --storage "$storage" \
+    --rootfs "${storage}:${disk_size}" \
+    --memory "$ram" \
+    --cores "$cores" \
+    --net0 "$net_conf" \
+    ${ns:+--nameserver "$ns"} \
+    --unprivileged 1 \
+    "${ssh_args[@]}" \
+    --start 1 \
+    --description "SecondBrain (LLM-Wiki nach Karpathy): Syncthing + Obsidian-Vaults (work/private)" \
+    >/dev/null 2>&1 || {
+      msg_error "pct create fehlgeschlagen."
+      exit 1
+    }
+
+  msg_info "Warte auf Container-Start ..."
+  for _ in $(seq 1 30); do
+    if pct exec "$vm_id" -- true >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+
+  # --- Setup-Script + Parameter in den Container uebertragen ---
+  msg_info "Uebertrage Einrichtungsscript in den Container ..."
+  awk '/^# ===== INNER_SETUP_START =====$/{f=1;next} /^# ===== INNER_SETUP_END =====$/{f=0} f' "$0" \
+    | pct exec "$vm_id" -- tee /root/inner-setup.sh >/dev/null
+
+  printf 'SYNC_GUI_USER=%q\nSYNC_GUI_PASS=%q\n' "$sync_user" "$sync_pass" \
+    | pct exec "$vm_id" -- tee /root/setup.env >/dev/null
+
+  # --- Setup ausfuehren ---
+  msg_info "Richte Container ein (Syncthing, Vaults, Backups) - das dauert einige Minuten ..."
+  if ! pct exec "$vm_id" -- bash /root/inner-setup.sh; then
+    msg_error "Einrichtung im Container fehlgeschlagen."
+    exit 1
+  fi
+
+  # --- Abschluss ---
+  local ct_ip_final
+  ct_ip_final=$(pct exec "$vm_id" -- sh -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '\n')
+  [ -n "$ct_ip_final" ] || ct_ip_final="$ct_ip"
+
+  clear
+  msg_ok "Fertig! Container $vm_id ($hostname) laeuft."
+  msg_ok "Syncthing-Web-UI:  http://${ct_ip_final}:8384   (User: ${sync_user})"
+  echo
+  pct exec "$vm_id" -- cat /root/DEVICE-SETUP.md
+  echo
+  msg_info "Die Anleitung liegt auch im Container unter /root/DEVICE-SETUP.md"
+  msg_info "Auszug auf dem Host:  pct pull $vm_id /root/DEVICE-SETUP.md ."
+}
+
+: <<'INNER_BLOCK'
+# ===== INNER_SETUP_START =====
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source /root/setup.env
+
+export DEBIAN_FRONTEND=noninteractive
+CT_SYNC_USER="syncthing"
+VAULT_BASE="/srv/vaults"
+CONFIG_HOME="/home/syncthing/.config/syncthing"
+
+echo ">>> [1/8] apt update"
+for _ in $(seq 1 10); do
+  if apt-get update -y >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+echo ">>> [2/8] Pakete installieren"
+apt-get install -y --no-install-recommends curl git jq syncthing apache2-utils cron >/dev/null
+
+echo ">>> [3/8] Syncthing-Benutzer anlegen"
+if ! id -u "$CT_SYNC_USER" >/dev/null 2>&1; then
+  useradd -r -m -d /home/syncthing -s /usr/sbin/nologin "$CT_SYNC_USER"
+fi
+
+echo ">>> [4/8] Vault-Verzeichnisse anlegen (work / private)"
+mkdir -p "$VAULT_BASE/work/raw" "$VAULT_BASE/work/wiki"
+mkdir -p "$VAULT_BASE/private/raw" "$VAULT_BASE/private/wiki"
+chown -R "$CT_SYNC_USER":"$CT_SYNC_USER" "$VAULT_BASE"
+
+echo ">>> [5/8] Syncthing-Konfiguration generieren"
+mkdir -p "$CONFIG_HOME"
+syncthing generate --home="$CONFIG_HOME" >/dev/null
+chown -R "$CT_SYNC_USER":"$CT_SYNC_USER" /home/syncthing
+
+mkdir -p "/etc/systemd/system/syncthing@syncthing.service.d"
+cat > /etc/systemd/system/syncthing@syncthing.service.d/override.conf <<'EOF'
+[Service]
+ReadWritePaths=/srv/vaults
+EOF
+systemctl daemon-reload
+
+systemctl enable syncthing@syncthing.service >/dev/null 2>&1 || true
+systemctl start syncthing@syncthing.service
+
+API_KEY=$(grep -oP '(?<=<apikey>)[^<]+' "$CONFIG_HOME/config.xml")
+DEVICE_ID=$(grep -oP '<device id="\K[^"]+' "$CONFIG_HOME/config.xml" | head -1)
+
+echo ">>> [6/8] Warte auf Syncthing-API ..."
+for _ in $(seq 1 30); do
+  if curl -sf -H "X-API-Key: $API_KEY" http://127.0.0.1:8384/rest/system/version >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+# Web-UI: Auth + LAN-Zugriff
+BCRYPT=$(htpasswd -nbB -C 10 "$SYNC_GUI_USER" "$SYNC_GUI_PASS" 2>/dev/null | cut -d: -f2)
+[ -n "$BCRYPT" ] || BCRYPT=$(htpasswd -nbB "$SYNC_GUI_USER" "$SYNC_GUI_PASS" | cut -d: -f2)
+
+cat > /tmp/gui.json <<EOF
+{
+  "enabled": true,
+  "address": "0.0.0.0:8384",
+  "user": "$SYNC_GUI_USER",
+  "password": "$BCRYPT",
+  "useTLS": false,
+  "sendBasicAuthPrompt": false,
+  "insecureAdminAccess": false,
+  "apiKey": "$API_KEY"
+}
+EOF
+curl -s -o /dev/null -H "X-API-Key: $API_KEY" -X PUT -d @/tmp/gui.json \
+  http://127.0.0.1:8384/rest/config/gui
+
+# Syncthing-Folders: work + private (mit Staggered File Versioning)
+: > /root/folder-ids.txt
+
+add_folder() {
+  local label="$1" path="$2" fid
+  fid=$(cat /proc/sys/kernel/random/uuid)
+  cat > /tmp/folder.json <<EOF
+{
+  "id": "$fid",
+  "label": "$label",
+  "path": "$path",
+  "type": "sendreceive",
+  "rescanIntervalS": 60,
+  "fsWatcherEnabled": true,
+  "fsWatcherDelayS": 10,
+  "ignorePerms": true,
+  "autoNormalize": true,
+  "devices": [ { "deviceID": "$DEVICE_ID" } ],
+  "versioning": {
+    "type": "staggered",
+    "params": { "cleanInterval": 3600, "maxAge": 2592000, "maxVersions": 5 }
+  }
+}
+EOF
+  curl -s -o /dev/null -H "X-API-Key: $API_KEY" -X POST -d @/tmp/folder.json \
+    http://127.0.0.1:8384/rest/config/folders
+  printf '%s:%s\n' "$label" "$fid" >> /root/folder-ids.txt
+}
+
+add_folder "work" "$VAULT_BASE/work"
+add_folder "private" "$VAULT_BASE/private"
+
+systemctl restart syncthing@syncthing.service
+
+echo ">>> [7/8] Vault-Scaffolding + Git-Versionierung"
+scaffold_vault() {
+  local v="$1"
+  local base="$VAULT_BASE/$v"
+
+  cat > "$base/index.md" <<'EOF'
+# Index
+
+> Dieser Index wird vom LLM-Wiki-Maintainer (OpenCode) gepflegt.
+
+## Wiki
+
+_Noch keine Seiten. Nach dem ersten Ingest legt der LLM hier die Artikel an._
+
+## Struktur
+
+- `raw/` - immutable Quellen (append-only)
+- `wiki/` - LLM-generierte Seiten (entities, concepts, synthesis)
+EOF
+
+  cat > "$base/log.md" <<'EOF'
+# Log
+
+> Append-only Chronik. Format: `## [YYYY-MM-DD] operation | Titel`
+> (nutzbar mit: `grep "^## \[" log.md | tail -5`)
+
+EOF
+
+  cat > "$base/AGENTS.md" <<'EOF'
+# AGENTS.md - LLM-Wiki-Schema (OpenCode)
+
+Du bist der Wiki-Maintainer dieses Vaults nach dem LLM-Wiki-Pattern von
+Andrej Karpathy. Du schreibst und pflegst das Wiki, der Nutzer kuratiert
+die Quellen.
+
+## Struktur
+
+- `raw/` - immutable Quellen, append-only. Nie bearbeiten.
+- `wiki/` - von dir gepflegte Markdown-Seiten (entities, concepts, synthesis).
+- `index.md` - Katalog aller wiki-Seiten, bei jedem Ingest aktualisieren.
+- `log.md` - append-only Chronik, Zeilenformat: `## [YYYY-MM-DD] operation | Titel`
+
+## Operationen
+
+### Ingest
+1. Neue Quelle lesen (roh, Bild, PDF, Artikel).
+2. Kern-Takeaways kurz mit dem Nutzer besprechen.
+3. Zusammenfassungs-Seite in `wiki/` schreiben.
+4. Relevante Entity-/Concept-Seiten anlegen oder aktualisieren.
+5. `index.md` aktualisieren.
+6. Eintrag in `log.md` anfuegen.
+
+### Query
+- Zuerst `index.md` lesen, dann die relevanten Seiten.
+- Antworten mit Quellenverweisen (`[[quelle]]`) formulieren.
+- Wertvolle Antworten als neue `wiki/`-Seite ablegen (Kompendium!).
+
+### Lint
+- Nach Widerspruechen, veralteten Claims, verwaisten Seiten und
+  fehlenden Verlinkungen suchen.
+- Datenluecken vorschlagen, die per Websuche fuellbar sind.
+
+## Konventionen
+
+- Wiki-Seiten: YAML-Frontmatter mit `title`, `summary`, `sources`, `last_updated`.
+- Quellen inline zitieren: `[[source: dateiname]]`.
+- Nichts in `raw/` aendern.
+EOF
+
+  cat > "$base/.gitignore" <<'EOF'
+.trash/
+.obsidian/workspace*
+EOF
+
+  git -C "$base" init -q
+  git -C "$base" config user.name "Obsidian"
+  git -C "$base" config user.email "obsidian@local"
+  git -C "$base" add -A
+  git -C "$base" commit -qm "Initial"
+}
+
+scaffold_vault "work"
+scaffold_vault "private"
+
+cat > /usr/local/bin/vault-git-commit <<'EOF'
+#!/bin/bash
+for v in work private; do
+  d=/srv/vaults/$v
+  [ -d "$d/.git" ] || continue
+  if [ -n "$(git -C "$d" status --porcelain)" ]; then
+    git -C "$d" add -A
+    git -C "$d" commit -qm "auto: $(date '+%Y-%m-%d %H:%M')"
+  fi
+done
+EOF
+chmod +x /usr/local/bin/vault-git-commit
+
+cat > /etc/cron.d/vault-git <<'EOF'
+0 */2 * * * root /usr/local/bin/vault-git-commit >/dev/null 2>&1
+EOF
+
+echo ">>> [8/8] Geräte-Anleitung schreiben"
+IP_ADDR=$(hostname -I | awk '{print $1}')
+
+cat > /root/DEVICE-SETUP.md <<EOF
+# SecondBrain - Geräte-Einrichtung
+
+## Zugangsdaten / IDs
+
+- Server-IP:        \`$IP_ADDR\`
+- Syncthing-Web-UI: \`http://$IP_ADDR:8384\`  (User: \`$SYNC_GUI_USER\`)
+- Server-Device-ID: \`$DEVICE_ID\`
+- Syncthing-Folders (Server):
+EOF
+while IFS=: read -r label fid; do
+  echo "- \`$label\` -> \`$fid\`" >> /root/DEVICE-SETUP.md
+done < /root/folder-ids.txt
+
+cat >> /root/DEVICE-SETUP.md <<EOF
+
+Die Vaults liegen auf dem Server unter:
+- Work:    /srv/vaults/work
+- Private: /srv/vaults/private
+
+Jeder Vault hat die Struktur: raw/ (Quellen), wiki/ (LLM-Seiten),
+index.md, log.md, AGENTS.md (Schema fuer OpenCode).
+
+## Grundprinzip der Trennung
+
+Arbeitsgeraete teilen NUR den Folder "work", private Geraete NUR den
+Folder "private". Der Server hält beide. So landet privater Inhalt nie
+auf einem Arbeitsgeraet und umgekehrt.
+
+---
+
+## 1) Desktop (Windows / Linux / Mac)
+
+1. Syncthing installieren (https://syncthing.net) und starten.
+2. Web-UI deines Geraets oeffnen (http://127.0.0.1:8384).
+3. "Remote-Geraet hinzufuegen": Server-Device-ID oben eintragen.
+4. Auf dem SERVER (Web-UI http://$IP_ADDR:8384):
+   - "Remote-Geraet hinzufuegen" -> Device-ID deines Geraets eintragen.
+   - Die Geraete muessen sich gegenseitig kennen und die Verbindung akzeptieren.
+5. Auf dem Server: "Ordner teilen" -> den passenden Folder (work ODER private)
+   mit deinem Geraet teilen.
+6. Auf deinem Geraet: Der geteilte Ordner wird angelegt. Fertig.
+
+## 2) Android
+
+1. "Syncthing" aus dem Play Store installieren.
+2. Gleiches Verfahren wie Desktop: Gerät + Server verbinden (Device-IDs
+   tauschen), den passenden Ordner (work/private) teilen.
+3. In Syncthing den Sync-Ordner an einen gut erreichbaren Ort legen
+   (z.B. /storage/emulated/0/Sync/...).
+
+## 3) iOS / iPadOS (iPhone / iPad)
+
+iOS hat kein natives Syncthing. Loesung: "Möbius Sync" (App Store,
+Syncthing-kompatibel).
+1. Möbius Sync installieren.
+2. Server als Remote-Geraet hinzufuegen (Server-Device-ID).
+3. Auf dem Server den passenden Ordner mit diesem Geraet teilen.
+4. Möbius Sync in "On My iPhone" synchronisieren lassen.
+5. Obsidian installieren und diesen lokalen Ordner als Vault oeffnen.
+
+## 4) Obsidian nutzen
+
+1. Obsidian installieren (Desktop oder mobil).
+2. "Ordner als Vault oeffnen" und den synchronisierten Ordner waehlen.
+3. Obsidian liest/schreibt lokal; Syncthing hält alle Geraete + Server
+   auf demselben Stand. Auch mobil kannst du schreiben - es wird
+   zuruecksynchronisiert.
+
+## 5) LLM-Maintainer (OpenCode)
+
+Das Herz des Patterns: OpenCode pflegt das Wiki automatisch.
+
+1. Auf einem Geraet (oder via SSH auf den Server) in den Vault wechseln:
+   \`cd /srv/vaults/work\`   (oder \`.../private\`)
+2. OpenCode starten. Die \`AGENTS.md\` im Vault-Root definiert die Regeln.
+3. Quellen einfach in \`raw/\` ablegen (z.B. mit dem Obsidian Web Clipper,
+   der Artikel als .md speichert) und den Ingest anstossen. OpenCode
+   aktualisiert wiki/, index.md und log.md automatisch.
+
+## 6) Backups
+
+Mehrere Schichten aktiv:
+
+1. Syncthing "Staggered File Versioning" (30 Tage) - ist bereits pro
+   Folder aktiviert: geloeschte/ueberschriebene Dateien sind im Web-UI
+   unter Ordner -> "Versionierung" wiederherstellbar.
+2. Git-Auto-Commit alle 2h je Vault (Cron: /etc/cron.d/vault-git).
+   History ansehen: \`git -C /srv/vaults/work log --oneline\`.
+3. Proxmox-Backup des Containers (ZFS-Snapshots) - auf dem HOST anlegen:
+   \`vzdump <VMID> --mode snapshot --compress zstd\`
+   oder besser: Backup-Job in der Proxmox-GUI unter
+   "Datacenter -> Backups" einrichten (Mode: snapshot, zstd).
+EOF
+
+chmod 644 /root/DEVICE-SETUP.md
+
+echo ">>> Einrichtung abgeschlossen."
+# ===== INNER_SETUP_END =====
+INNER_BLOCK
+
+main "$@"
