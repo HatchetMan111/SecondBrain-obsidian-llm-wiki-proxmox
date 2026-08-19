@@ -396,52 +396,85 @@ EOF
 EOF
 
   cat > "$base/AGENTS.md" <<'EOF'
-# AGENTS.md - LLM-Wiki-Schema (OpenCode)
+# AGENTS.md - LLM-Wiki-Schema v2 (OpenCode)
 
 Du bist der Wiki-Maintainer dieses Vaults nach dem LLM-Wiki-Pattern von
-Andrej Karpathy. Du schreibst und pflegst das Wiki, der Nutzer kuratiert
-die Quellen.
+Andrej Karpathy (v1) mit den Erweiterungen aus "LLM Wiki v2" von rohitg00
+(Confidence, Supersession, Self-Healing-Lint, Typed Relationships).
+Du schreibst und pflegst das Wiki; der Nutzer kuratiert Quellen und Richtung.
 
 ## Struktur
 
 - `raw/` - immutable Quellen, append-only. Nie bearbeiten.
-- `wiki/` - von dir gepflegte Markdown-Seiten (entities, concepts, synthesis).
+- `wiki/` - von dir gepflegte Markdown-Seiten (entities, concepts, decisions, digests).
 - `index.md` - Katalog aller wiki-Seiten, bei jedem Ingest aktualisieren.
-- `log.md` - append-only Chronik, Zeilenformat: `## [YYYY-MM-DD] operation | Titel`
+- `log.md` - append-only Chronik UND Audit-Trail (siehe unten).
+
+## Frontmatter-Konvention (jede wiki-Seite)
+
+    title, type (entity|concept|decision|digest), summary,
+    sources: [], confidence: 0.0-1.0, last_confirmed: YYYY-MM-DD,
+    supersedes: [], superseded_by: [],
+    relationships: [{relation, target}]
+
+Relationstypen: uses, depends-on, contradicts, supersedes, caused, fixed.
 
 ## Operationen
 
 ### Ingest
-1. Neue Quelle lesen (roh, Bild, PDF, Artikel).
+1. Quelle lesen. Vor dem Schreiben SENSIBLE DATEN entfernen (API-Keys,
+   Tokens, Passwoerter, PII) - nie ins Wiki uebernehmen.
 2. Kern-Takeaways kurz mit dem Nutzer besprechen.
-3. Zusammenfassungs-Seite in `wiki/` schreiben.
-4. Relevante Entity-/Concept-Seiten anlegen oder aktualisieren.
-5. `index.md` aktualisieren.
-6. Eintrag in `log.md` anfuegen.
+3. Entities extrahieren (Person/Projekt/Library/Konzept/Datei/Entscheidung)
+   mit Typ, Attributen und Beziehungen.
+4. Zusammenfassungs-Seite + Entity-/Concept-Seiten schreiben/aktualisieren.
+5. Confidence vergeben: Anzahl Quellen + Aktualitaet + Widersprueche.
+6. `index.md` aktualisieren, Eintrag in `log.md` anfuegen.
 
 ### Query
-- Zuerst `index.md` lesen, dann die relevanten Seiten.
+- Zuerst `index.md`, dann die relevanten Seiten.
 - Antworten mit Quellenverweisen (`[[quelle]]`) formulieren.
 - Wertvolle Antworten als neue `wiki/`-Seite ablegen (Kompendium!).
+- Bei Beziehungsfragen ("Was haengt von X ab?") ueber die
+  `relationships`-Eintraege wandern, nicht nur Stichwortsuche.
 
-### Lint
-- Nach Widerspruechen, veralteten Claims, verwaisten Seiten und
-  fehlenden Verlinkungen suchen.
+### Supersession
+- Neue Info widerspricht/aktualisiert alte: NEUE Seite schreiben, alte
+  Seite mit `superseded_by: [[neue]]` markieren (nicht loeschen),
+  in `log.md` vermerken (wann/warum).
+
+### Lint (health check, self-healing)
+Regelmaessig ausfuehren:
+- Widersprueche finden UND aufloesen (Quell-Alter, Quell-Autoritaet,
+  Anzahl Belege); der Nutzer kann ueberstimmen.
+- Superseded/stale Claims markieren.
+- Verwaiste Seiten verlinken oder als orphan flaggen.
+- Fehlende Verlinkungen reparieren.
+- Retention: Seiten ohne Bestaetigung >90 Tage fuer Review flaggen
+  (nicht loeschen!).
+- Qualitaet: unstrukturierte/unkontierte Seiten ueberarbeiten.
 - Datenluecken vorschlagen, die per Websuche fuellbar sind.
+
+### Digest / Kristallisation
+Nach abgeschlossener Recherche-/Debugging-Session einen Digest anlegen:
+Frage, Erkenntnisse, beteiligte Dateien/Entities, Lehren. Lehren als
+Standalone-Fakten ins Wiki uebernehmen.
 
 ## Konventionen
 
-- Wiki-Seiten: YAML-Frontmatter mit `title`, `summary`, `sources`, `last_updated`.
-- Quellen inline zitieren: `[[source: dateiname]]`.
-- Nichts in `raw/` aendern.
+- Kein `raw/` aendern. Keine Geheimnisse ins Wiki.
+- `log.md` = Audit-Trail: jeder Ingest/Lint/Supersession mit Zeitstempel
+  und Grund. Format: `## [YYYY-MM-DD] operation | Titel`
+- Wenn unsicher: lieber fragen als raten.
 EOF
 
   cat > "$base/CLAUDE.md" <<'EOF'
 # CLAUDE.md - Erinnerung fuer Claude Code
 
-Dieser Vault folgt dem LLM-Wiki-Pattern von Andrej Karpathy
-(raw/ + wiki/ + index.md + log.md). Das vollstaendige Schema steht in
-AGENTS.md - lies es und handle nach dessen Regeln.
+Dieser Vault folgt dem LLM-Wiki-Pattern von Andrej Karpathy (v1) mit den
+Erweiterungen aus "LLM Wiki v2" von rohitg00 (Confidence, Supersession,
+Self-Healing-Lint). Das vollstaendige Schema steht in AGENTS.md - lies
+es und handle nach dessen Regeln.
 
 ## Kernregeln
 

@@ -20,8 +20,10 @@ dabei die "IDE", der LLM der "Programmierer", das Wiki die "Codebasis".
   privater Inhalt nie auf Arbeitsgeräten landet (und umgekehrt)
 - 🔄 **Syncthing**: jeder Vault hat auf jedem Gerät eine lokale Kopie, offline nutzbar,
   Konflikte werden gelöst (Staggered File Versioning 30 Tage)
-- 🧠 **LLM-Wiki-Schema**: `AGENTS.md` (OpenCode/Codex) und `CLAUDE.md` (Claude Code)
+- 🧠 **LLM-Wiki-Schema (v2)**: `AGENTS.md` (OpenCode/Codex) und `CLAUDE.md` (Claude Code)
   im Vault-Root definieren die Regeln für Ingest / Query / Lint (nach Karpathys Gist)
+  – inkl. **Confidence-Scoring, Supersession, Self-Healing-Lint, Typed Relationships,
+  Privacy-Filter und Digest** (Erweiterungen aus "LLM Wiki v2" von rohitg00)
   – funktioniert mit beliebigen KI-Agenten
 - 💾 **Mehrfach-Backups**: Syncthing-Versionierung, Git-Auto-Commit (alle 2h) je Vault,
   ZFS-Snapshots über den Proxmox-Backup-Job
@@ -187,10 +189,36 @@ Struktur ist und welche Workflows gelten.
   aktualisiert `index.md` und `log.md`, verknüpft Querverweise
 - **Query**: Fragen gegen das Wiki beantworten, wertvolle Antworten wieder
   als neue Seiten ablegen (das Wissen kompoundiert!)
-- **Lint**: Widersprüche, verwaiste Seiten, veraltete Claims finden
+- **Lint**: Widersprüche finden und auflösen, verwaiste Seiten, veraltete Claims,
+  Qualitätsprobleme – und selbst heilen, was heilbar ist (self-healing)
 
 Tipp: Mit dem **Obsidian Web Clipper** lassen sich Webartikel direkt als `.md`
 in `raw/` ablegen – so bleibt der Ingest-Workflow denkbar einfach.
+
+## Qualitätssicherung (Erweiterungen aus "LLM Wiki v2")
+
+Das generierte Schema baut auf Karpathys v1 auf und übernimmt die Mechaniken,
+die [rohitg00s "LLM Wiki v2"](https://gist.github.com/rohitg00/2067ab416f7bbe447c1977edaaa681e2)
+aus dem Betrieb mit `agentmemory` beigesteuert hat – damit das Wiki nicht "verrottet":
+
+- **Confidence-Scoring**: Jede wiki-Seite trägt im Frontmatter `confidence`, `sources`,
+  `last_confirmed`. Der Agent schätzt die Zuverlässigkeit ein und `lint` senkt sie,
+  wenn nichts die Behauptung kürzlich bestätigt hat.
+- **Supersession**: Neue Informationen markieren die alte Seite als `superseded_by`
+  (statt sie zu überschreiben oder zu löschen) – Versionierung für Wissen.
+- **Self-Healing-Lint**: Der Lint-Pass repariert Verwaiste, fehlende Links und
+  unstrukturierte Seiten automatisch und löst Widersprüche (Quell-Alter + Autorität + Belege).
+- **Typed Relationships**: `relationships: [{relation, target}]` mit Typen wie
+  `uses`, `depends-on`, `contradicts`, `supersedes` – der Agent kann bei
+  Beziehungsfragen den Graphen durchlaufen statt nur zu suchen.
+- **Privacy-Filter**: Beim Ingest werden API-Keys, Tokens, Passwörter und PII
+  entfernt; `log.md` dient als Audit-Trail aller Änderungen.
+- **Digest/Kristallisation**: Abgeschlossene Recherche-/Debug-Sessions werden zu
+  komprimierten `digest`-Seiten (Frage, Erkenntnisse, Lehren) verdichtet.
+
+Alles ist modular – wer's schlank will, nutzt nur v1. Die v2-Mechaniken stecken
+bewusst in der Schema-Datei (`AGENTS.md`/`CLAUDE.md`) und lassen sich bei Bedarf
+an- und ausbauen.
 
 ## Backups
 
@@ -214,6 +242,14 @@ Das Gist beschreibt die Idee (drei Ebenen: raw sources / wiki / schema; Operatio
 Ingest, Query, Lint; Index & Log). Dieses Repo setzt das Muster für Proxmox + Syncthing +
 Obsidian um. Karpathys Gist steht unter keiner expliziten Lizenz; wir übernehmen keinen
 Text, sondern referenzieren das Pattern und verdanken ihm die Architektur.
+
+**v2-Erweiterungen:** Das Schema übernimmt zudem Mechanismen aus
+**rohitg00s "LLM Wiki v2"** (["LLM Wiki v2"](https://gist.github.com/rohitg00/2067ab416f7bbe447c1977edaaa681e2),
+Confidence-Scoring, Supersession, Self-Healing-Lint, Typed Relationships,
+Privacy-Filter, Digest), das die Erfahrungen aus
+[agentmemory](https://github.com/rohitg00/agentmemory) dokumentiert.
+Auch dieses Gist steht ohne explizite Lizenz – wir übernehmen keine Texte,
+sondern setzen die Ideen als eigene Schema-Regeln um.
 
 **Script-Stil:** Der Installer folgt dem Stil der Proxmox-Community-Install-Scripts
 ([community-scripts](https://github.com/community-scripts/ProxmoxVE) / ursprünglich tteck).
