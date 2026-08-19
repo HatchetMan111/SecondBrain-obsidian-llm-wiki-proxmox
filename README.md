@@ -90,16 +90,21 @@ Standardwerte – nur auf "Enter" zu drücken funktioniert.
    <vault>/
    ├── raw/        ← immutable Quellen (append-only)
    ├── wiki/       ← LLM-generierte Seiten
+   ├── pending.md  ← Inbox: neue Quellen (automatisch gepflegt)
    ├── index.md    ← Katalog aller Seiten
    ├── log.md      ← append-only Chronik
    ├── AGENTS.md   ← Schema für OpenCode / Codex (Ingest/Query/Lint)
    ├── CLAUDE.md   ← Schema für Claude Code
-   └── .gitignore
+   ├── .meta/      ← interner Verarbeitungsstand (ingested.txt)
+   └── .stignore   ← Syncthing: .git wird nicht synchronisiert
    ```
-8. **Backups**: Git-Init je Vault + Auto-Commit-Cron (alle 2h)
-9. **Abschluss**: zeigt Syncthing-URL, Zugangsdaten, Server-Device-ID, Folder-IDs und
-   eine vollständige Geräte-Anleitung (liegt im Container unter `/root/DEVICE-SETUP.md`,
-   Abruf mit `pct pull <VMID> /root/DEVICE-SETUP.md .`)
+8. **Inbox (Pending)**: `pending.md` je Vault + stündlicher Cron, der neue Quellen
+   aus `raw/` automatisch als To-do-Liste einträgt
+9. **Backups + Automation**: Git-Auto-Commit (alle 2h), optionale tägliche
+   autonome Wartung (Lint/Digest per KI-Agent-Cron, standardmäßig deaktiviert)
+10. **Abschluss**: zeigt Syncthing-URL, Zugangsdaten, Server-Device-ID, Folder-IDs und
+    eine vollständige Geräte-Anleitung (liegt im Container unter `/root/DEVICE-SETUP.md`,
+    Abruf mit `pct pull <VMID> /root/DEVICE-SETUP.md .`)
 
 ## Nach der Installation – Geräte anbinden
 
@@ -219,6 +224,50 @@ aus dem Betrieb mit `agentmemory` beigesteuert hat – damit das Wiki nicht "ver
 Alles ist modular – wer's schlank will, nutzt nur v1. Die v2-Mechaniken stecken
 bewusst in der Schema-Datei (`AGENTS.md`/`CLAUDE.md`) und lassen sich bei Bedarf
 an- und ausbauen.
+
+## Täglicher Workflow & Automatisierung
+
+So sieht der alltägliche Ablauf aus – der Agent verdaut die Informationen, die
+immer wieder dazukommen, in einem festen Kreislauf:
+
+```text
+CAPTURE → INBOX → INGEST → PFLEGE
+  │         │        │        │
+  │         │        │        └─ Lint + Digest (manuell ODER autonom)
+  │         │        └────────── Agent ordnet ein: Confidence, Relationships,
+  │         │                     wiki-Seiten, index.md, log.md
+  │         └─────────────────── pending.md listet offene Quellen (stündlich)
+  └───────────────────────────── Quelle in raw/ ablegen (Web Clipper, PDF, Datei)
+```
+
+1. **Capture (du):** Neue Quelle ablegen – Artikel per Obsidian Web Clipper
+   (wird als `.md` + lokale Bilder gespeichert), PDF oder Notiz direkt in `raw/`.
+2. **Inbox (automatisch):** Der Cron-Job `track-pending.sh` (stündlich) vergleicht
+   `raw/` mit `.meta/ingested.txt` und schreibt neue, unverarbeitete Dateien als
+   Checkboxen in `pending.md`. In Obsidian siehst du jederzeit, was wartet.
+3. **Ingest (du + Agent):** Du startest den Agenten im Vault und sagst
+   `Ingest alle offenen Punkte aus pending.md`. Der Agent liest die Quellen,
+   extrahiert Entities, vergibt Confidence, schreibt/aktualisiert wiki-Seiten,
+   `index.md` und `log.md`, und trägt die Dateinamen in `.meta/ingested.txt` ein –
+   danach verschwinden sie automatisch aus `pending.md`.
+4. **Pflege (periodisch):** `Führe Lint aus` findet Widersprüche, verwaiste Seiten
+   und Stale Claims und heilt, was heilbar ist. Nach großen Sessions einen
+   Digest anlegen lassen (Kristallisation).
+5. **Autonom (optional):** Soll der Server ohne Zutun täglich um 03:15
+   Lint + Digest fahren, installierst du deinen Agenten zusätzlich im Container
+   und aktivierst es mit einem Befehl:
+
+   ```bash
+   # im Container (ggf. Docker/Komplett-Install nötig, z. B. opencode):
+   curl -fsSL https://opencode.ai/install | bash
+   touch /etc/secondbrain/autonomous        # aktiviert den täglichen Cron
+   tail -f /var/log/secondbrain-maintain.log
+   ```
+
+   Ingest bleibt bewusst **manuell** – Kuratieren und Ausrichten soll am Menschen
+   hängen (wie von Karpathy empfohlen); nur die Wartung (Lint/Digest) ist
+   automatisierbar. Der Cron erkennt automatisch, welcher Agent installiert ist
+   (opencode / claude / codex) und nutzt dessen Headless-Modus.
 
 ## Backups
 

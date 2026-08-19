@@ -407,8 +407,13 @@ Du schreibst und pflegst das Wiki; der Nutzer kuratiert Quellen und Richtung.
 
 - `raw/` - immutable Quellen, append-only. Nie bearbeiten.
 - `wiki/` - von dir gepflegte Markdown-Seiten (entities, concepts, decisions, digests).
+- `pending.md` - automatisch gepflegte Inbox: neue Quellen aus `raw/`
+  warten hier auf Ingest (wird stuendlich aktualisiert).
 - `index.md` - Katalog aller wiki-Seiten, bei jedem Ingest aktualisieren.
 - `log.md` - append-only Chronik UND Audit-Trail (siehe unten).
+- `.meta/ingested.txt` - Dateinamen der bereits verarbeiteten Quellen
+  (eine pro Zeile). Nach dem Ingest eintragen, damit die Quelle aus
+  `pending.md` verschwindet.
 
 ## Frontmatter-Konvention (jede wiki-Seite)
 
@@ -429,7 +434,10 @@ Relationstypen: uses, depends-on, contradicts, supersedes, caused, fixed.
    mit Typ, Attributen und Beziehungen.
 4. Zusammenfassungs-Seite + Entity-/Concept-Seiten schreiben/aktualisieren.
 5. Confidence vergeben: Anzahl Quellen + Aktualitaet + Widersprueche.
-6. `index.md` aktualisieren, Eintrag in `log.md` anfuegen.
+6. `index.md` aktualisieren.
+7. Dateiname der Quelle in `.meta/ingested.txt` eintragen (eine pro Zeile) -
+   danach verschwindet sie automatisch aus `pending.md`.
+8. Eintrag in `log.md` anfuegen.
 
 ### Query
 - Zuerst `index.md`, dann die relevanten Seiten.
@@ -489,6 +497,17 @@ EOF
 .obsidian/workspace*
 EOF
 
+  mkdir -p "$base/.meta"
+  : > "$base/.meta/ingested.txt"
+  cat > "$base/.stignore" <<'EOF'
+.git/
+EOF
+  cat > "$base/pending.md" <<'EOF'
+# Pending-Inbox
+
+_Noch keine Quellen. Neue Dateien in `raw/` werden hier automatisch gelistet._
+EOF
+
   git -C "$base" init -q
   git -C "$base" config user.name "Obsidian"
   git -C "$base" config user.email "obsidian@local"
@@ -498,6 +517,8 @@ EOF
 
 scaffold_vault "work"
 scaffold_vault "private"
+
+chown -R "$CT_SYNC_USER":"$CT_SYNC_USER" "$VAULT_BASE"
 
 cat > /usr/local/bin/vault-git-commit <<'EOF'
 #!/bin/bash
@@ -514,6 +535,66 @@ chmod +x /usr/local/bin/vault-git-commit
 
 cat > /etc/cron.d/vault-git <<'EOF'
 0 */2 * * * root /usr/local/bin/vault-git-commit >/dev/null 2>&1
+EOF
+
+cat > /usr/local/bin/track-pending.sh <<'EOF'
+#!/bin/bash
+# Pending-Inbox je Vault aktualisieren: listet neue Dateien aus raw/,
+# die noch nicht in .meta/ingested.txt stehen.
+for v in work private; do
+  dir=/srv/vaults/$v
+  [ -d "$dir/raw" ] || continue
+  state="$dir/.meta/ingested.txt"
+  [ -f "$state" ] || : > "$state"
+  tmp="$(mktemp)"
+  : > "$tmp"
+  while IFS= read -r -d '' f; do
+    base="$(basename "$f")"
+    if ! grep -qxF -- "$base" "$state" 2>/dev/null; then
+      printf -- '- [ ] %s  _(entdeckt: %s)_\n' "$base" "$(date +%F)" >> "$tmp"
+    fi
+  done < <(find "$dir/raw" -maxdepth 1 -type f -print0 | sort -z)
+  if [ -s "$tmp" ]; then
+    { printf "# Pending-Inbox\n\nNeue Quellen in \`raw/\` warten auf Ingest:\n\n"; cat "$tmp"; } > "$dir/pending.md"
+  else
+    printf "# Pending-Inbox\n\n_Alle Quellen verarbeitet - nichts zu tun._\n" > "$dir/pending.md"
+  fi
+  rm -f "$tmp"
+  chown syncthing:syncthing "$dir/pending.md" "$dir/.meta/ingested.txt" 2>/dev/null || true
+done
+EOF
+chmod +x /usr/local/bin/track-pending.sh
+
+cat > /usr/local/bin/secondbrain-maintain-cron <<'EOF'
+#!/bin/bash
+# Optionale taegliche Wartung: Lint + Digest durch einen KI-Agenten.
+# Aktivieren: touch /etc/secondbrain/autonomous   (Agent muss im Container installiert sein)
+LOG=/var/log/secondbrain-maintain.log
+agent=""
+for c in opencode claude codex; do
+  if command -v "$c" >/dev/null 2>&1; then agent="$c"; break; fi
+done
+[ -n "$agent" ] || exit 0
+for v in work private; do
+  dir=/srv/vaults/$v
+  [ -d "$dir/.git" ] || continue
+  cd "$dir" || continue
+  echo "=== $(date '+%Y-%m-%d %H:%M') : $v via $agent ===" >> "$LOG"
+  case "$agent" in
+    opencode) opencode run "Fuehre Lint und optional einen Digest gemaess AGENTS.md aus. Protokolliere die Aenderungen." >> "$LOG" 2>&1 ;;
+    claude)   claude -p "Fuehre Lint und optional einen Digest gemaess CLAUDE.md aus. Protokolliere die Aenderungen." >> "$LOG" 2>&1 ;;
+    codex)    codex exec "Fuehre Lint und optional einen Digest gemaess AGENTS.md aus. Protokolliere die Aenderungen." >> "$LOG" 2>&1 ;;
+  esac
+done
+EOF
+chmod +x /usr/local/bin/secondbrain-maintain-cron
+
+cat > /etc/cron.d/secondbrain-maintain <<'EOF'
+# Stuendlich: Pending-Inbox aktualisieren (kein Token-Verbrauch).
+7 * * * * root /usr/local/bin/track-pending.sh >/dev/null 2>&1
+# Optional taeglich 03:15: auto Lint/Digest durch KI-Agent.
+# Aktivieren mit: touch /etc/secondbrain/autonomous
+15 3 * * * root test -f /etc/secondbrain/autonomous && /usr/local/bin/secondbrain-maintain-cron >/dev/null 2>&1
 EOF
 
 echo ">>> [8/8] Geräte-Anleitung schreiben"
@@ -608,16 +689,39 @@ Syncthing-kompatibel).
 
 ## 5) LLM-Maintainer (OpenCode)
 
-Das Herz des Patterns: OpenCode pflegt das Wiki automatisch.
+Das Herz des Patterns: der Agent pflegt das Wiki, du kuratierst Quellen.
 
 1. Auf einem Geraet (oder via SSH auf den Server) in den Vault wechseln:
    \`cd /srv/vaults/work\`   (oder \`.../private\`)
-2. OpenCode starten. Die \`AGENTS.md\` im Vault-Root definiert die Regeln.
-3. Quellen einfach in \`raw/\` ablegen (z.B. mit dem Obsidian Web Clipper,
-   der Artikel als .md speichert) und den Ingest anstossen. OpenCode
-   aktualisiert wiki/, index.md und log.md automatisch.
+2. Agent starten (opencode / claude / codex). Die \`AGENTS.md\` bzw.
+   \`CLAUDE.md\` im Vault-Root definieren die Regeln.
+3. Quellen einfach in \`raw/\` ablegen (z.B. mit dem Obsidian Web Clipper) -
+   und dem Agent einfach sagen: "Ingest die offenen Punkte aus pending.md".
 
-## 6) Backups
+## 6) Taeglicher Workflow - wie ordnet der Agent neue Infos zu?
+
+Der Kreislauf: CAPTURE -> INBOX -> INGEST -> PFLEGE
+
+1. CAPTURE (du): Neue Quelle ablegen - Artikel per Obsidian Web Clipper
+   (speichert als .md), PDF oder Datei einfach in \`raw/\` ziehen.
+2. INBOX (automatisch, stuendlich): \`track-pending.sh\` listet neue Dateien
+   aus \`raw/\` in \`pending.md\` (als Checkboxen). In Obsidian siehst du
+   jederzeit, was noch wartet.
+3. INGEST (du + Agent): Agent im Vault starten und sagen:
+   "Ingest alle offenen Punkte aus pending.md". Der Agent liest die Quellen,
+   ordnet sie ein (Confidence, Relationships), schreibt/aktualisiert
+   wiki-Seiten + \`index.md\` + \`log.md\` und traegt die Dateinamen in
+   \`.meta/ingested.txt\` ein. Danach verschwinden sie aus \`pending.md\`.
+4. PFLEGE (periodisch): "Fuehre Lint aus" - der Agent findet Widersprueche,
+   verwaiste Seiten, Stale Claims und heilt, was heilbar ist. Nach grossen
+   Sessions einen Digest anlegen lassen.
+5. AUTONOM (optional): Soll der Server selbst taeglich um 03:15 Lint+Digest
+   fahren (ohne dass du startest), installiere deinen Agenten ZUSAETZLICH
+   im Container (z.B. \`curl -fsSL https://opencode.ai/install | bash\`) und:
+     touch /etc/secondbrain/autonomous
+   Log: /var/log/secondbrain-maintain.log
+
+## 7) Backups
 
 Mehrere Schichten aktiv:
 
