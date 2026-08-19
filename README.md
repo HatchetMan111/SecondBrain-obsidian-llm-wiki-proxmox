@@ -20,8 +20,9 @@ dabei die "IDE", der LLM der "Programmierer", das Wiki die "Codebasis".
   privater Inhalt nie auf Arbeitsgeräten landet (und umgekehrt)
 - 🔄 **Syncthing**: jeder Vault hat auf jedem Gerät eine lokale Kopie, offline nutzbar,
   Konflikte werden gelöst (Staggered File Versioning 30 Tage)
-- 🧠 **LLM-Wiki-Schema**: `AGENTS.md` im Vault-Root definiert für OpenCode die Regeln für
-  Ingest / Query / Lint (nach Karpathys Gist)
+- 🧠 **LLM-Wiki-Schema**: `AGENTS.md` (OpenCode/Codex) und `CLAUDE.md` (Claude Code)
+  im Vault-Root definieren die Regeln für Ingest / Query / Lint (nach Karpathys Gist)
+  – funktioniert mit beliebigen KI-Agenten
 - 💾 **Mehrfach-Backups**: Syncthing-Versionierung, Git-Auto-Commit (alle 2h) je Vault,
   ZFS-Snapshots über den Proxmox-Backup-Job
 - 📱 **Alle Geräte**: Windows, Linux, macOS, Android (Syncthing-App) und iOS (Möbius Sync)
@@ -89,7 +90,8 @@ Standardwerte – nur auf "Enter" zu drücken funktioniert.
    ├── wiki/       ← LLM-generierte Seiten
    ├── index.md    ← Katalog aller Seiten
    ├── log.md      ← append-only Chronik
-   ├── AGENTS.md   ← Schema für OpenCode (Ingest/Query/Lint)
+   ├── AGENTS.md   ← Schema für OpenCode / Codex (Ingest/Query/Lint)
+   ├── CLAUDE.md   ← Schema für Claude Code
    └── .gitignore
    ```
 8. **Backups**: Git-Init je Vault + Auto-Commit-Cron (alle 2h)
@@ -99,15 +101,38 @@ Standardwerte – nur auf "Enter" zu drücken funktioniert.
 
 ## Nach der Installation – Geräte anbinden
 
-Die komplette Anleitung wird beim Install-Abschluss ausgegeben. Kurzfassung:
+### Was der Installer am Ende ausgibt
 
-1. **Syncthing auf dem Gerät** installieren (Desktop: https://syncthing.net,
-   Android: Syncthing-App, iOS: Möbius Sync).
-2. **Gerät ↔ Server verbinden**: beide müssen sich gegenseitig als Remote-Gerät
-   hinzufügen (Device-IDs austauschen) und die Verbindung bestätigen.
-3. **Ordner teilen**: auf dem Server den passenden Folder (`work` ODER `private`)
-   mit dem Gerät teilen.
-4. **Obsidian**: "Ordner als Vault öffnen" und den synchronisierten Ordner wählen.
+Zum Abschluss zeigt das Script:
+
+- **Syncthing-Web-UI-URL**: `http://<Container-IP>:8384` (mit User/Passwort)
+  – hier verwaltest du Geräte und Ordner des Servers
+- **Server-Device-ID** und die **IDs beider Folder** (`work` / `private`)
+- eine **Kurzfassung** mit den nächsten Schritten
+- die **vollständige Anleitung** (`/root/DEVICE-SETUP.md`, Abruf auch per
+  `pct pull <VMID> /root/DEVICE-SETUP.md .`)
+
+### Wie dein Vault auf deine Geräte kommt (die "geteilte Ordner"-Frage)
+
+Es gibt **keine einzelne Vault-URL** – und das ist beabsichtigt. Syncthing
+synchronisiert Ordner direkt **Gerät-zu-Gerät** (ähnlich wie Git). Der Server
+ist der immer-auf-Knoten: Web-UI auf Port `8384`, Übertragungen auf Port `22000`.
+
+Sobald du auf einem Gerät einmal die **Device-IDs ausgetauscht** und den
+Folder per **"Ordner teilen"** verbunden hast, erscheint der Vault dort als
+ganz **normaler lokaler Ordner**. Obsidian öffnet genau diesen Ordner
+("Ordner als Vault öffnen"). Alles Schreiben passiert lokal, Syncthing
+hält alle Geräte automatisch auf demselben Stand – das ist das Syncthing-
+Modell, nicht ein Cloud-Link.
+
+Kurzfassung pro Gerät:
+
+```text
+1. Syncthing installieren und starten
+2. Gerät + Server gegenseitig hinzufügen (Server-Device-ID; optional Adresse tcp://<IP>:22000)
+3. Auf dem Server "Ordner teilen" → work ODER private mit dem Gerät teilen
+4. Der Vault liegt nun lokal → in Obsidian als Vault öffnen
+```
 
 ## Work / Private-Trennung
 
@@ -116,24 +141,56 @@ Die komplette Anleitung wird beim Install-Abschluss ausgegeben. Kurzfassung:
   Dadurch liegen private Dateien physisch nie auf einem Arbeitsgerät.
 - Der Server hält beide Vaults (z. B. für Backups) – er sollte entsprechend geschützt sein.
 
-## LLM-Maintainer mit OpenCode
+## KI-Agenten anbinden (OpenCode, Claude Code, Codex, ...)
 
-Das Herz des Patterns – der LLM pflegt das Wiki, du kuratierst Quellen:
+Das Herz des Patterns: **ein LLM-Agent pflegt das Wiki**, du kuratierst Quellen.
+Jeder Vault enthält dafür zwei Schema-Dateien, die der jeweilige Agent beim
+Start automatisch liest:
+
+| Agent              | Datei im Vault | Hinweis |
+|--------------------|----------------|---------|
+| OpenCode           | `AGENTS.md`    | Agent im Vault-Ordner starten |
+| Codex / Codex CLI  | `AGENTS.md`    | wird automatisch eingelesen |
+| Claude Code        | `CLAUDE.md`    | wird automatisch eingelesen |
+| Andere Agenten     | `AGENTS.md`    | versteht AGENTS.md i.d.R. nativ; sonst Vault-Ordner als Kontext angeben |
+
+### So startest du deinen Agenten
+
+Der Agent läuft ganz normal auf einem Gerät **in dem synchronisierten Vault-Ordner**
+(also demselben Ordner, den Obsidian als Vault öffnet):
 
 ```bash
-# auf einem Gerät oder via SSH auf dem Server
-cd /srv/vaults/work        # oder .../private
+# Work-Vault (z.B. auf deinem PC)
+cd <dein-syncthing-ordner>/work
+
+# OpenCode
 opencode
+
+# Claude Code
+claude
+
+# Codex CLI
+codex
 ```
 
-Die `AGENTS.md` im Vault-Root definiert die drei Operationen:
+Ohne CLI, für beliebige Agenten: einfach den Vault-Ordner als Projekt/Arbeitsverzeichnis
+oder Kontext angeben – die `AGENTS.md`/`CLAUDE.md` sagt dem Agenten, wie die
+Struktur ist und welche Workflows gelten.
 
-- **Ingest**: Quelle ablegen → OpenCode liest, schreibt wiki-Seiten, aktualisiert Index und Log
-- **Query**: Fragen gegen das Wiki beantworten, Antworten wieder als Seiten ablegen (Kompendium!)
+> Du kannst den Agenten auch direkt auf dem Server ausführen (per SSH):
+> `cd /srv/vaults/work && opencode` – egal wo er läuft, der Vault ist über
+> Syncthing immer aktuell.
+
+### Was die Agenten tun (aus der AGENTS.md/CLAUDE.md)
+
+- **Ingest**: Quelle ablegen → der Agent liest, schreibt wiki-Seiten,
+  aktualisiert `index.md` und `log.md`, verknüpft Querverweise
+- **Query**: Fragen gegen das Wiki beantworten, wertvolle Antworten wieder
+  als neue Seiten ablegen (das Wissen kompoundiert!)
 - **Lint**: Widersprüche, verwaiste Seiten, veraltete Claims finden
 
-Tipp: Mit dem **Obsidian Web Clipper** lassen sich Webartikel direkt als `.md` in `raw/`
-ablegen – so bleibt der Ingest-Workflow denkbar einfach.
+Tipp: Mit dem **Obsidian Web Clipper** lassen sich Webartikel direkt als `.md`
+in `raw/` ablegen – so bleibt der Ingest-Workflow denkbar einfach.
 
 ## Backups
 
@@ -161,8 +218,11 @@ Text, sondern referenzieren das Pattern und verdanken ihm die Architektur.
 **Script-Stil:** Der Installer folgt dem Stil der Proxmox-Community-Install-Scripts
 ([community-scripts](https://github.com/community-scripts/ProxmoxVE) / ursprünglich tteck).
 
-**LLM-Agent:** Empfohlener Wiki-Maintainer ist [OpenCode](https://opencode.ai), ein
-Open-Source-Tool. Andere AGENTS.md-fähige Agenten (z. B. Codex) funktionieren ebenfalls.
+**KI-Agenten:** Als Wiki-Maintainer kommen beliebige AGENTS.md-/CLAUDE.md-fähige
+Agenten in Frage, z. B. [OpenCode](https://opencode.ai) (open-source),
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) oder
+[OpenAI Codex](https://developers.openai.com/codex/). Die Schema-Dateien in
+den Vaults legen fest, wie sie arbeiten.
 
 **Obsidian & Syncthing** sind unabhängige Open-Source-Projekte:
 [obsidian.md](https://obsidian.md) · [syncthing.net](https://syncthing.net)

@@ -238,6 +238,16 @@ main() {
   msg_ok "Fertig! Container $vm_id ($hostname) laeuft."
   msg_ok "Syncthing-Web-UI:  http://${ct_ip_final}:8384   (User: ${sync_user})"
   echo
+  msg_ok "So verbindest du jetzt dein erstes Geraet (Kurzfassung):"
+  msg_ok "  1) Syncthing auf dem Geraet installieren und starten"
+  msg_ok "  2) Geraet + Server gegenseitig hinzufuegen: unter 'Add Remote Device'"
+  msg_ok "     die Server-Device-ID unten eintragen (auf dem Server dein Geraet bestaetigen)"
+  msg_ok "  3) Auf dem Server: 'Ordner teilen' - work ODER private mit deinem Geraet teilen"
+  msg_ok "  4) Der Vault erscheint lokal als normaler Ordner -> in Obsidian als"
+  msg_ok "     'Ordner als Vault oeffnen' auswaehlen (und ein KI-Agent kann dort arbeiten)"
+  echo
+  msg_info "Details, Zugangsdaten und Geraete-Anleitung:"
+  echo
   pct exec "$vm_id" -- cat /root/DEVICE-SETUP.md
   echo
   msg_info "Die Anleitung liegt auch im Container unter /root/DEVICE-SETUP.md"
@@ -426,6 +436,21 @@ die Quellen.
 - Nichts in `raw/` aendern.
 EOF
 
+  cat > "$base/CLAUDE.md" <<'EOF'
+# CLAUDE.md - Erinnerung fuer Claude Code
+
+Dieser Vault folgt dem LLM-Wiki-Pattern von Andrej Karpathy
+(raw/ + wiki/ + index.md + log.md). Das vollstaendige Schema steht in
+AGENTS.md - lies es und handle nach dessen Regeln.
+
+## Kernregeln
+
+- `raw/` ist immutable (append-only), nie bearbeiten.
+- Wiki-Seiten in `wiki/` schreiben, mit Frontmatter und Quellenverweisen.
+- `index.md` bei jedem Ingest aktualisieren, `log.md`-Eintrag anfuegen.
+- Ingest / Query / Lint genau wie in AGENTS.md beschrieben durchfuehren.
+EOF
+
   cat > "$base/.gitignore" <<'EOF'
 .trash/
 .obsidian/workspace*
@@ -482,7 +507,23 @@ Die Vaults liegen auf dem Server unter:
 - Private: /srv/vaults/private
 
 Jeder Vault hat die Struktur: raw/ (Quellen), wiki/ (LLM-Seiten),
-index.md, log.md, AGENTS.md (Schema fuer OpenCode).
+index.md, log.md, AGENTS.md (Schema fuer OpenCode/Codex), CLAUDE.md
+(Schema fuer Claude Code).
+
+## Wie dein Vault auf deine Geraete kommt
+
+Es gibt keine "Vault-URL": Syncthing synchronisiert Ordner direkt
+Geraet-zu-Geraet (aehnlich wie Git-Repos). Der Server ist dabei der
+immer-auf-Knoten:
+
+- Web-UI (Server):  http://$IP_ADDR:8384   - hier verwaltest du Geraete und Folder
+- Sync-Port:        tcp://$IP_ADDR:22000   - hier laufen die Uebertragungen
+
+Sobald du (1) dein Geraet per Device-ID verbunden und (2) den Ordner auf
+dem Server mit deinem Geraet geteilt hast, erscheint der Vault auf deinem
+Geraet als ganz normaler lokaler Ordner. Diesen oeffnest du in Obsidian
+("Ordner als Vault oeffnen") - derselbe Ordner, den auch dein KI-Agent
+liest und schreibt.
 
 ## Grundprinzip der Trennung
 
@@ -497,6 +538,8 @@ auf einem Arbeitsgeraet und umgekehrt.
 1. Syncthing installieren (https://syncthing.net) und starten.
 2. Web-UI deines Geraets oeffnen (http://127.0.0.1:8384).
 3. "Remote-Geraet hinzufuegen": Server-Device-ID oben eintragen.
+   Tipp: Als Adresse optional \`tcp://$IP_ADDR:22000\` eintragen, damit
+   die Verbindung ohne Discovery sofort aufgebaut wird.
 4. Auf dem SERVER (Web-UI http://$IP_ADDR:8384):
    - "Remote-Geraet hinzufuegen" -> Device-ID deines Geraets eintragen.
    - Die Geraete muessen sich gegenseitig kennen und die Verbindung akzeptieren.
