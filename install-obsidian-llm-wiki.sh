@@ -11,7 +11,7 @@
 # =====================================================================
 # shellcheck disable=SC2154,SC1090,SC2016,SC2317
 
-INSTALLER_VERSION="2.2.0"
+INSTALLER_VERSION="2.3.0"
 
 set -euo pipefail
 
