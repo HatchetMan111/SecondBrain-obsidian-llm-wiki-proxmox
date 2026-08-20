@@ -269,6 +269,60 @@ CAPTURE → INBOX → INGEST → PFLEGE
    automatisierbar. Der Cron erkennt automatisch, welcher Agent installiert ist
    (opencode / claude / codex) und nutzt dessen Headless-Modus.
 
+## Obsidian & Agenten produktiv nutzen
+
+### Zugangsdaten (aus der Installation)
+
+| Womit | Zugang |
+|---|---|
+| Syncthing-Web-UI (Server) | `http://<Container-IP>:8384` – User/Passwort wie im Install-Prompt gewählt |
+| Web-UI-Passwort vergessen? | `pct exec <VMID> -- cat /root/setup.env` zeigt `SYNC_GUI_PASS=…`, ändern unter Web-UI → **Einstellungen → GUI** |
+| Server-Device-ID | wird am Install-Ende ausgegeben, steht auch in `/root/DEVICE-SETUP.md` |
+| Vault-Ordner am Server | `/srv/vaults/work` und `/srv/vaults/private` |
+| In den Container | `pct enter <VMID>` (vom Proxmox-Host) |
+
+### Obsidian: Vault öffnen (einmalig je Gerät)
+
+1. **Obsidian** installieren (desktop: <https://obsidian.md>, mobil: App-/Play-Store).
+2. **„Ordner als Vault öffnen"** und den **synchronisierten Ordner** wählen
+   (auf dem Gerät dort, wo Syncthing `work` ablegt).
+3. Obsidian zeigt dann `raw/`, `wiki/`, `pending.md`, `index.md`, `log.md` –
+   inkl. Suche, Mermaid-Diagramme, Backlinks. Alles Schreiben passiert lokal;
+   Syncthing hält Server und andere Geräte automatisch aktuell.
+
+Hinweis: Work- und Private-Vault öffnest du als **zwei getrennte Vaults** in Obsidian
+("Work" und "Privat" als unterschiedliche Ordner/Fenster) – sie bleiben strikt getrennt.
+
+### Der erste Ingest (Schnellstart)
+
+1. **Quelle ablegen:** Artikel per **Obsidian Web Clipper** (Browser-Erweiterung)
+   als Markdown in `raw/` speichern, oder PDF/Datei in den `raw/`-Ordner ziehen.
+2. **Warten:** `track-pending.sh` (stündlich) listet die neue Datei als Checkbox
+   in `pending.md` – in Obsidian direkt sichtbar.
+3. **Agent starten** im Vault-Ordner (Terminal):
+
+   ```bash
+   cd <dein-syncthing-ordner>/work
+   opencode        # oder: claude  /  codex
+   ```
+
+   und sagen: **„Ingest alle offenen Punkte aus pending.md."**
+   Der Agent liest die Quellen, schreibt/aktualisiert `wiki/`-Seiten
+   (inkl. Confidence + Relationships), aktualisiert `index.md` und `log.md`
+   und trägt die Dateinamen in `.meta/ingested.txt` ein – danach verschwinden
+   sie automatisch aus `pending.md`. Die neuen Seiten erscheinen in Obsidian
+   nach dem nächsten Syncthing-Sync.
+4. **Pflegen:** regelmäßig **„Führe Lint aus"** (Agent heilt Widersprüche,
+   Orphans, Stale Claims) und nach großen Sessions einen **Digest** anlegen lassen.
+
+### Agent direkt auf dem Server?
+
+Auch möglich: `cd /srv/vaults/work && opencode` (per SSH bzw. `pct enter` in den
+Container). Egal wo er läuft – der Vault ist über Syncthing immer auf demselben Stand.
+Für Automatik (täglich 03:15 Lint+Digest) einen Agenten im Container installieren
+und `/etc/secondbrain/autonomous` anlegen (Details siehe DEVICE-SETUP.md bzw. Schritt 5
+im täglichen Workflow).
+
 ## Backups
 
 Drei unabhängige Schichten:
