@@ -103,7 +103,7 @@ main() {
   root_check
   pve_check
 
-  local vm_id hostname ct_ip net_conf gw ns bridge storage disk_size ram cores sshkey sync_user sync_pass
+  local vm_id hostname ct_ip net_conf gw ns bridge storage disk_size disk_int ram cores sshkey sync_user sync_pass
 
   vm_id=$(prompt_whiptail "Container-ID" "Container-ID (VMID):" "$(default_vmid)")
   hostname=$(prompt_whiptail "Hostname" "Hostname des Containers:" "obsidian")
@@ -164,6 +164,10 @@ main() {
   if [[ ! "$disk_size" =~ ^[0-9]+[GMK]?$ ]]; then
     msg_error "Ungueltige Disk-Groesse: $disk_size (Beispiel: 16G)."
     exit 1
+  fi
+  disk_int=$(echo "$disk_size" | tr -cd '0-9')
+  if [ "$disk_int" != "$disk_size" ]; then
+    msg_warn "Disk-Groesse '${disk_size}' -> nur Zahl '${disk_int}' wird an pct uebergeben (Directory-Storage vertraegt kein 'G')."
   fi
   if [ -n "$sshkey" ] && [ ! -f "$sshkey" ]; then
     msg_error "SSH-Key-Datei nicht gefunden: $sshkey"
@@ -227,7 +231,7 @@ main() {
   pct_output=$(pct create "$vm_id" "$template" \
     --hostname "$hostname" \
     --storage "$storage" \
-    --rootfs "${storage}:${disk_size}" \
+    --rootfs "${storage}:${disk_int}" \
     --memory "$ram" \
     --cores "$cores" \
     --net0 "$net_conf" \
@@ -240,11 +244,12 @@ main() {
       msg_error "pct create fehlgeschlagen. Ausgabe von pct:"
       echo -e "${RED}${pct_output}${RESET}"
       msg_error "Haeufige Ursachen:"
+      msg_error "  - Disk-Groesse mit Einheit (16G) bei Directory-Storage wie 'local'"
       msg_error "  - Statische IP ohne CIDR/Netzmaske"
       msg_error "  - Gateway/Nameserver absichtlich leer gelassen"
       msg_error "  - VMID $vm_id ist evtl. belegt oder defekt (siehe obige Ausgabe)"
       msg_error "  - Storage '${storage}' hat keinen rootdir/pct-Speicherplatz"
-      msg_error "  - Fehlendes/falsches Debian-Template"
+      msg_error "  - Template-Datei fehlt trotz Download"
       pct destroy "$vm_id" --purge >/dev/null 2>&1 || true
       exit 1
     }
