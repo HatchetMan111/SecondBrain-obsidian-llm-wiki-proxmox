@@ -53,7 +53,7 @@ pve_check() {
     msg_error "Dieses Script muss direkt auf dem Proxmox-Host ausgefuehrt werden."
     exit 1
   fi
-  msg_ok "Proxmox VE erkannt: $(pveversion | awk '{print $2}')"
+  msg_ok "Proxmox VE erkannt: $(pveversion | awk '{print $1}')"
 }
 
 # ---------------------------------------------------------------------
@@ -120,6 +120,10 @@ main() {
   else
     gw=$(prompt_whiptail "Gateway" "Gateway (z.B. 192.168.1.1):" "")
     ns=$(prompt_whiptail "Nameserver" "Nameserver (z.B. 1.1.1.1):" "1.1.1.1")
+    if [[ "$ct_ip" != */* ]]; then
+      msg_error "Statische IP muss CIDR-Notation enthalten (z.B. 192.168.1.100/24), aktuell: $ct_ip"
+      exit 1
+    fi
   fi
 
   storage=$(detect_storage)
@@ -141,6 +145,29 @@ main() {
   if [ -z "$sync_pass" ]; then
     sync_pass=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 14 || true)
     msg_warn "Kein Passwort eingegeben - zufaellig generiert: $sync_pass"
+  fi
+
+  # --- Eingaben validieren (bevor pct create laeuft) ---
+  case "$vm_id" in
+    ''|*[!0-9]*) msg_error "Ungueltige Container-ID: $vm_id (nur Ziffern)."; exit 1 ;;
+  esac
+  if [ -z "$hostname" ]; then
+    msg_error "Hostname darf nicht leer sein (nur [a-z0-9-])."
+    exit 1
+  fi
+  case "$ram" in
+    ''|*[!0-9]*) msg_error "RAM muss eine Zahl sein (MB)."; exit 1 ;;
+  esac
+  case "$cores" in
+    ''|*[!0-9]*) msg_error "CPU-Cores muss eine Zahl sein."; exit 1 ;;
+  esac
+  if [[ ! "$disk_size" =~ ^[0-9]+[GMK]?$ ]]; then
+    msg_error "Ungueltige Disk-Groesse: $disk_size (Beispiel: 16G)."
+    exit 1
+  fi
+  if [ -n "$sshkey" ] && [ ! -f "$sshkey" ]; then
+    msg_error "SSH-Key-Datei nicht gefunden: $sshkey"
+    exit 1
   fi
 
   # --- Container existiert bereits? ---
@@ -179,7 +206,15 @@ main() {
   if [ "$ct_ip" = "dhcp" ]; then
     net_conf="name=eth0,bridge=${bridge},ip=dhcp"
   else
-    net_conf="name=eth0,bridge=${bridge},ip=${ct_ip},gw=${gw}"
+    net_conf="name=eth0,bridge=${bridge},ip=${ct_ip}"
+    if [ -n "$gw" ]; then
+      net_conf+=",gw=${gw}"
+    else
+      msg_warn "Kein Gateway angegeben - Container wird ohne Gateway angelegt (nur lokale Netze erreichbar)."
+    fi
+    if [ -z "$ns" ]; then
+      msg_warn "Kein Nameserver angegeben - DNS-Aufloesung im Container wird nicht funktionieren."
+    fi
   fi
 
   # --- Container anlegen ---
@@ -189,7 +224,7 @@ main() {
     ssh_args=(--ssh-public-keys "$sshkey")
   fi
 
-  pct create "$vm_id" "$template" \
+  pct_output=$(pct create "$vm_id" "$template" \
     --hostname "$hostname" \
     --storage "$storage" \
     --rootfs "${storage}:${disk_size}" \
@@ -201,8 +236,16 @@ main() {
     "${ssh_args[@]}" \
     --start 1 \
     --description "SecondBrain (LLM-Wiki nach Karpathy): Syncthing + Obsidian-Vaults (work/private)" \
-    >/dev/null 2>&1 || {
-      msg_error "pct create fehlgeschlagen."
+    2>&1) || {
+      msg_error "pct create fehlgeschlagen. Ausgabe von pct:"
+      echo -e "${RED}${pct_output}${RESET}"
+      msg_error "Haeufige Ursachen:"
+      msg_error "  - Statische IP ohne CIDR/Netzmaske"
+      msg_error "  - Gateway/Nameserver absichtlich leer gelassen"
+      msg_error "  - VMID $vm_id ist evtl. belegt oder defekt (siehe obige Ausgabe)"
+      msg_error "  - Storage '${storage}' hat keinen rootdir/pct-Speicherplatz"
+      msg_error "  - Fehlendes/falsches Debian-Template"
+      pct destroy "$vm_id" --purge >/dev/null 2>&1 || true
       exit 1
     }
 
